@@ -23,7 +23,10 @@
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
+
+use fs2::FileExt;
+use tempfile::NamedTempFile;
 
 use anyhow::Context;
 
