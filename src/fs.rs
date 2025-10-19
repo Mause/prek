@@ -81,7 +81,7 @@ impl LockedFile {
         tokio::task::spawn_blocking(move || Self::lock_file_blocking(file, &resource)).await?
     }
 
-        #[cfg(unix)]
+    #[cfg(unix)]
     fn create(path: impl AsRef<Path>) -> Result<fs_err::File, std::io::Error> {
         use std::os::unix::fs::PermissionsExt;
 
@@ -131,7 +131,7 @@ impl LockedFile {
             .write(true)
             .create(true)
             .open(path.as_ref())
-                }
+    }
 }
 
 impl Drop for LockedFile {
