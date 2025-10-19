@@ -71,7 +71,6 @@ impl LockedFile {
     }
 
     /// Acquire a cross-process lock for a resource using a file at the provided path.
-    #[cfg(feature = "tokio")]
     pub async fn acquire(
         path: impl AsRef<Path>,
         resource: impl Display,
