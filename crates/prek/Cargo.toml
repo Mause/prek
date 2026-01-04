@@ -39,6 +39,7 @@ dunce = { workspace = true }
 etcetera = {  workspace = true }
 fancy-regex = {  workspace = true }
 fs-err = {  workspace = true, features = ["tokio"] }
+fs2 = { workspace = true }
 futures = {  workspace = true }
 hex = { workspace = true }
 http = { workspace = true }
