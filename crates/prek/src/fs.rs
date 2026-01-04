@@ -23,12 +23,29 @@
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
+
+use fs2::FileExt;
+use tempfile::NamedTempFile;
 
 use anyhow::Context;
 
 pub static CWD: LazyLock<PathBuf> =
     LazyLock::new(|| std::env::current_dir().expect("The current directory must be exist"));
+
+/// Whether the error is due to a lock being held.
+fn is_known_already_locked_error(err: &std::io::Error) -> bool {
+    if matches!(err.kind(), std::io::ErrorKind::WouldBlock) {
+        return true;
+    }
+
+    // On Windows, we've seen: Os { code: 33, kind: Uncategorized, message: "The process cannot access the file because another process has locked a portion of the file." }
+    if cfg!(windows) && err.raw_os_error() == Some(33) {
+        return true;
+    }
+
+    false
+}
 
 /// A file lock that is automatically released when dropped.
 #[derive(Debug)]
@@ -38,35 +55,33 @@ impl LockedFile {
     /// Inner implementation for [`LockedFile::acquire_blocking`] and [`LockedFile::acquire`].
     fn lock_file_blocking(file: fs_err::File, resource: &str) -> Result<Self, std::io::Error> {
         trace!(
-            resource,
-            path = %file.path().display(),
-            "Checking lock",
+            "Checking lock for `{resource}` at `{}`",
+            file.path().user_display()
         );
-        match file.try_lock() {
+        match file.file().try_lock_exclusive() {
             Ok(()) => {
-                debug!(resource, "Acquired lock");
+                debug!("Acquired lock for `{resource}`");
                 Ok(Self(file))
             }
             Err(err) => {
-                // Log error code and enum kind to help debugging more exotic failures
-                if !matches!(err, std::fs::TryLockError::WouldBlock) {
-                    trace!(error = ?err, "Try lock error");
+                // Log error code and enum kind to help debugging more exotic failures.
+                if !is_known_already_locked_error(&err) {
+                    debug!("Try lock error: {err:?}");
                 }
                 info!(
-                    resource,
-                    path = %file.path().display(),
-                    "Waiting to acquire lock",
+                    "Waiting to acquire lock for `{resource}` at `{}`",
+                    file.path().user_display(),
                 );
-                file.lock().map_err(|err| {
-                    // Not a fs_err method, we need to build our own path context
+                file.file().lock_exclusive().map_err(|err| {
+                    // Not an fs_err method, we need to build our own path context
                     std::io::Error::other(format!(
                         "Could not acquire lock for `{resource}` at `{}`: {}",
-                        file.path().display(),
+                        file.path().user_display(),
                         err
                     ))
                 })?;
 
-                trace!(resource, "Acquired lock");
+                debug!("Acquired lock for `{resource}`");
                 Ok(Self(file))
             }
         }
@@ -77,9 +92,61 @@ impl LockedFile {
         path: impl AsRef<Path>,
         resource: impl Display,
     ) -> Result<Self, std::io::Error> {
-        let file = fs_err::File::create(path.as_ref())?;
+        let file = Self::create(path)?;
         let resource = resource.to_string();
         tokio::task::spawn_blocking(move || Self::lock_file_blocking(file, &resource)).await?
+    }
+
+    #[cfg(unix)]
+    fn create(path: impl AsRef<Path>) -> Result<fs_err::File, std::io::Error> {
+        use std::os::unix::fs::PermissionsExt;
+
+        // If path already exists, return it.
+        if let Ok(file) = fs_err::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.as_ref())
+        {
+            return Ok(file);
+        }
+
+        // Otherwise, create a temporary file with 777 permissions. We must set
+        // permissions _after_ creating the file, to override the `umask`.
+        let file = if let Some(parent) = path.as_ref().parent() {
+            NamedTempFile::new_in(parent)?
+        } else {
+            NamedTempFile::new()?
+        };
+        if let Err(err) = file
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o777))
+        {
+            warn!("Failed to set permissions on temporary file: {err}");
+        }
+
+        // Try to move the file to path, but if path exists now, just open path
+        match file.persist_noclobber(path.as_ref()) {
+            Ok(file) => Ok(fs_err::File::from_parts(file, path.as_ref())),
+            Err(err) => {
+                if err.error.kind() == std::io::ErrorKind::AlreadyExists {
+                    fs_err::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(path.as_ref())
+                } else {
+                    Err(err.error)
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn create(path: impl AsRef<Path>) -> std::io::Result<fs_err::File> {
+        fs_err::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path.as_ref())
     }
 }
 
